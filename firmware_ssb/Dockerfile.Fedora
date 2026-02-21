@@ -1,0 +1,62 @@
+# Dockerfile for building Raspberry Pi Pico RP2350 firmware
+# Based on Fedora Latest (and NOT on Rawhide)
+
+FROM fedora:latest
+
+# Set the Pico board type
+ENV PICO_BOARD=waveshare_rp2350_zero
+
+# Set PICO_SDK_PATH to the location where it will be in the container
+ENV PICO_SDK_PATH=/workspace/pico-sdk
+
+# Install required dependencies for Pico SDK and CMake builds
+RUN dnf -y update && dnf -y install --setopt=install_weak_deps=False gcc-arm-linux-gnu \
+ arm-none-eabi-gcc-cs-c++ \
+ arm-none-eabi-gcc-cs \
+ arm-none-eabi-binutils \
+ arm-none-eabi-newlib \
+ git cmake python3 \
+ gcc-c++ make gcc
+
+# Create workspace directory
+WORKDIR /workspace
+
+# Clone the Pico SDK from the develop branch
+RUN git clone --branch develop --depth 1 --recurse-submodules --shallow-submodules https://github.com/raspberrypi/pico-sdk.git /workspace/pico-sdk
+
+RUN cd /workspace/pico-sdk && \
+    git pull && \
+    cd lib/tinyusb && \
+    git checkout master && git pull
+
+# Install picotool for flashing Pico devices
+RUN git clone --depth 1 https://github.com/raspberrypi/picotool.git /tmp/picotool && \
+    cd /tmp/picotool && \
+    mkdir build && \
+    cd build && \
+    cmake .. && \
+    make -j$(nproc) && \
+    make install && \
+    cd / && \
+    rm -rf /tmp/picotool
+
+ADD "https://www.random.org/cgi-bin/randbyte?nbytes=10&format=h" skipcache
+
+# Copy the firmware source code
+COPY . /workspace/
+
+# Build the firmware with optional serial number binding
+RUN chmod +x build.sh && \
+    if [ -n "$AUTHORIZED_SERIAL" ]; then \
+        echo "Building with authorized serial: $AUTHORIZED_SERIAL" && \
+        cmake -B build -S . -DAUTHORIZED_SERIAL="$AUTHORIZED_SERIAL"; \
+    else \
+        echo "Building DEMO firmware (no serial restriction)" && \
+        cmake -B build -S .; \
+    fi && \
+    cmake --build build -j$(nproc) && \
+    echo "Build complete. Looking for artifacts..." && \
+    find build -name '*.uf2' -o -name '*.elf' -o -name '*.bin' -o -name '*.hex' | head -10
+
+# Default command - show build artifacts
+CMD ["sh", "-c", "echo 'Build complete. Firmware artifacts:' && ls -lh *.uf2 *.elf *.bin 2>/dev/null || echo 'No firmware files found in root directory'"]
