@@ -1,0 +1,32 @@
+# Docker ignore file to exclude unnecessary files from build context
+
+# Build artifacts
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.uf2
+*.elf
+*.bin
+*.hex
+*.map
+*.dis
+
+# Git
+.git/
+.gitignore
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Documentation
+*.md
+!README.md

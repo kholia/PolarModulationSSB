@@ -1,0 +1,74 @@
+
+.include C2M0280120D.lib
+
+*========================
+* Supply
+*========================
+VDD VDD 0 48
+Cbulk VDD 0 470u
+Cdec1 VDD 0 1u
+Cdec2 VDD 0 100n
+
+*========================
+* MOSFETs (in-phase)
+*========================
+Vtemp TEMP 0 25
+X1 DRAIN_COMMON G1 0 TJ1 TEMP C2M0280120D
+X2 DRAIN_COMMON G2 0 TJ2 TEMP C2M0280120D
+X3 DRAIN_COMMON G3 0 TJ3 TEMP C2M0280120D
+RTJ1 TJ1 0 1G
+RTJ2 TJ2 0 1G
+RTJ3 TJ3 0 1G
+
+* Drain RF choke
+Lrfc VDD DRAIN_COMMON 15u
+
+*========================
+* Output transformer (2T:9T, 1:4.5 ratio)
+*========================
+* Primary is AC coupled to the common drain
+Cblk DRAIN_COMMON P 10u
+Lp P 0 1u
+Ls SEC 0 20.25u
+
+* Magnetic coupling
+K1 Lp Ls 0.99
+
+*========================
+* RF Low Pass Filter (5-pole, ~8MHz cutoff)
+*========================
+Clpf1 SEC 0 470p
+Llpf1 SEC Nlpf1 1.5u
+Clpf2 Nlpf1 0 1000p
+Llpf2 Nlpf1 OUT 1.5u
+Clpf3 OUT 0 470p
+
+*========================
+* Load
+*========================
+Rload OUT 0 50
+
+*========================
+* Gate drive (in-phase)
+*========================
+Vg GDRV 0 PULSE(0 15 0 2n 2n 71n 142n)
+
+Rg1 GDRV G1 4.7
+Rg2 GDRV G2 4.7
+Rg3 GDRV G3 4.7
+
+Rgs1 G1 0 10k
+Rgs2 G2 0 10k
+Rgs3 G3 0 10k
+
+*========================
+* Snubber
+*========================
+Rsn DRAIN_COMMON 0 10
+Csn DRAIN_COMMON 0 220p
+
+*========================
+* Analysis
+*========================
+.tran 0 1m 0 0.5n
+.options plotwinsize=0

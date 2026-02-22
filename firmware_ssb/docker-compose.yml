@@ -1,0 +1,28 @@
+services:
+  firmware-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        # Pass AUTHORIZED_SERIAL from environment or command line
+        # Usage: AUTHORIZED_SERIAL=E66160D0E77B5A28 docker compose build
+        AUTHORIZED_SERIAL: ${AUTHORIZED_SERIAL:-}
+    image: firmware_ssb:latest
+    container_name: firmware_ssb
+    volumes:
+      # Mount the source directory to get build artifacts out
+      - ./build-output:/workspace/build-output
+    environment:
+      - PICO_BOARD=waveshare_rp2350_zero
+    # Override default CMD to copy artifacts to mounted volume
+    command:
+      - /bin/sh
+      - -c
+      - |
+        echo 'Copying build artifacts...'
+        mkdir -p /workspace/build-output
+        chmod 777 /workspace/build-output
+        find /workspace/build -type f -name '*.uf2' -exec cp {} /workspace/build-output/ \;
+        chmod 666 /workspace/build-output/*.uf2 2>/dev/null || true
+        echo 'Build artifacts in ./build-output/:'
+        ls -lh /workspace/build-output/ || echo 'No build artifacts found'

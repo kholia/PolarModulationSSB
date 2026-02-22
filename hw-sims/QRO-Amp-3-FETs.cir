@@ -1,0 +1,88 @@
+
+.include C2M0280120D.lib
+
+*========================
+* Supply
+*========================
+VDD VDD 0 48
+Cbulk VDD 0 470u
+Cdec1 VDD 0 1u
+Cdec2 VDD 0 100n
+
+*========================
+* MOSFETs (in-phase)
+*========================
+Vtemp TEMP 0 25
+X1 DRAIN1 G1 0 TJ1 TEMP C2M0280120D
+X2 DRAIN2 G2 0 TJ2 TEMP C2M0280120D
+X3 DRAIN3 G3 0 TJ3 TEMP C2M0280120D
+RTJ1 TJ1 0 1G
+RTJ2 TJ2 0 1G
+RTJ3 TJ3 0 1G
+
+* Drain RF chokes (one per FET – realistic)
+Lrfc1 VDD DRAIN1 15u
+Lrfc2 VDD DRAIN2 15u
+Lrfc3 VDD DRAIN3 15u
+
+*========================
+* Current summing transformer
+*========================
+* Each primary is AC coupled to the drain
+Cblk1 DRAIN1 P1 1u
+Cblk2 DRAIN2 P2 1u
+Cblk3 DRAIN3 P3 1u
+Lp1 P1 0 200n
+Lp2 P2 0 200n
+Lp3 P3 0 200n
+
+* Secondary
+Ls SEC 0 5u
+
+* Magnetic coupling
+K1 Lp1 Lp2 Lp3 Ls 0.985
+
+*========================
+* RF Low Pass Filter (5-pole, ~8MHz cutoff)
+*========================
+Clpf1 SEC 0 470p
+Llpf1 SEC Nlpf1 1.5u
+Clpf2 Nlpf1 0 1000p
+Llpf2 Nlpf1 OUT 1.5u
+Clpf3 OUT 0 470p
+
+*========================
+* Load
+*========================
+Rload OUT 0 50
+
+*========================
+* Gate drive (in-phase)
+*========================
+Vg GDRV 0 PULSE(0 15 0 2n 2n 71n 142n)
+
+Rg1 GDRV G1 4.7
+Rg2 GDRV G2 4.7
+Rg3 GDRV G3 4.7
+
+Rgs1 G1 0 10k
+Rgs2 G2 0 10k
+Rgs3 G3 0 10k
+
+*========================
+* Snubber
+*========================
+Rsn1 DRAIN1 0 10
+Csn1 DRAIN1 0 220p
+
+Rsn2 DRAIN2 0 10
+Csn2 DRAIN2 0 220p
+
+Rsn3 DRAIN3 0 10
+Csn3 DRAIN3 0 220p
+
+*========================
+* Analysis
+*========================
+.tran 0 250u 0 0.5n
+.options plotwinsize=0
