@@ -1,0 +1,45 @@
+menu "Polar SSB configuration"
+
+    choice POLAR_DEFAULT_PROFILE
+        prompt "Default I2C/audio profile"
+        default POLAR_PROFILE_2MHZ_32K
+
+        config POLAR_PROFILE_1MHZ_16K
+            bool "1 MHz I2C / 16 ksample/s (fallback)"
+
+        config POLAR_PROFILE_2MHZ_16K
+            bool "2 MHz I2C / 16 ksample/s (recommended)"
+
+        config POLAR_PROFILE_2MHZ_32K
+            bool "2 MHz I2C / 32 ksample/s (experimental)"
+
+        config POLAR_PROFILE_3MHZ_32K
+            bool "3 MHz I2C / 32 ksample/s (experimental)"
+    endchoice
+
+    config POLAR_I2C_SDA_GPIO
+        int "Si5351 SDA GPIO"
+        range 0 48
+        default 1
+
+    config POLAR_I2C_SCL_GPIO
+        int "Si5351 SCL GPIO"
+        range 0 48
+        default 2
+
+    config POLAR_PTT_GPIO
+        int "PTT GPIO"
+        range 0 48
+        default 14
+
+    config POLAR_AM_PWM_GPIO
+        int "Drain-modulation PWM GPIO"
+        range 0 48
+        default 4
+
+    config POLAR_SI5351_XTAL_HZ
+        int "Si5351 crystal frequency (Hz)"
+        range 10000000 40000000
+        default 25000000
+
+endmenu

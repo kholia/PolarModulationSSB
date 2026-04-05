@@ -1,0 +1,15 @@
+{
+  "samples": 160000,
+  "duration_seconds": 10.0,
+  "quantization_radians_per_lsb": 0.024736950028266088,
+  "phase_step_error_rms": 0.010127855372878497,
+  "phase_step_error_max": 0.024659917545502452,
+  "cumulative_phase_error_max": 0.012368243998500662,
+  "receiver_correlation": 0.9943166683989035,
+  "receiver_si_sdr_db": 19.406523243727293,
+  "si5351_phase_to_b_factor": 5553.962567382001,
+  "hardware_receiver_correlation": 0.9943170129038266,
+  "hardware_receiver_si_sdr_db": 19.406788765998705,
+  "seam_step_radians": 2.008622407913208,
+  "seam_step_quantized": 81
+}

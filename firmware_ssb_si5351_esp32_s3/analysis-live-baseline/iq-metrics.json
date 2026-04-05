@@ -1,0 +1,41 @@
+{
+  "input": "0.raw",
+  "format": "interleaved little-endian complex float32",
+  "sample_rate_hz": 768000.0,
+  "complex_samples": 13990702,
+  "duration_seconds": 18.217059895833334,
+  "fft_size": 262144,
+  "resolution_hz": 2.9296875,
+  "averaged_segments": 48,
+  "carrier_offset_hz": -41.015625,
+  "opposite_sideband_suppression_db": 15.22377276649626,
+  "carrier_relative_to_wanted_db": -8.277604710777277,
+  "transition_relative_to_wanted_db": -22.20675857452985,
+  "dump_relative_to_wanted_db": -29.13322660398858,
+  "obw_90": {
+    "width_hz": 1816.40625,
+    "low_hz": -32.2265625,
+    "high_hz": 1784.1796875
+  },
+  "obw_95": {
+    "width_hz": 2235.3515625,
+    "low_hz": -55.6640625,
+    "high_hz": 2179.6875
+  },
+  "obw_99": {
+    "width_hz": 4602.5390625,
+    "low_hz": -1722.65625,
+    "high_hz": 2879.8828125
+  },
+  "update_image_energy_relative_to_wanted_db": {
+    "-64000": -34.711984890612364,
+    "-48000": -34.70374165514765,
+    "-32000": -34.61510394034,
+    "-16000": -34.24711665602865,
+    "0": 1.402122266028857,
+    "16000": -34.234196465711776,
+    "32000": -34.65358221023988,
+    "48000": -34.70140038911207,
+    "64000": -34.75324549434142
+  }
+}

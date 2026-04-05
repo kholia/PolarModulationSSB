@@ -1,0 +1,10 @@
+services:
+  firmware-build:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        IDF_IMAGE: ${IDF_IMAGE:-espressif/idf:latest}
+    image: polar-ssb-esp32s3:latest
+    volumes:
+      - ./build-output:/project/build-output

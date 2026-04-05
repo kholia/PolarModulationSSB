@@ -1,0 +1,42 @@
+{
+  "settings": {
+    "input": "ESP32-S3-Si5351-Sample.wav",
+    "output_prefix": "simulate/phase-optimized-airspy",
+    "sample_rate": 16000,
+    "duration": 10.0,
+    "iterations": 200,
+    "low_hz": 300.0,
+    "high_hz": 3000.0,
+    "dump_hz": 4500.0,
+    "target_peak": 0.7,
+    "spectral_relaxation": 0.65,
+    "stopband_retention": 0.02,
+    "max_phase_step": 0.0,
+    "report_every": 200
+  },
+  "source_rate": 48000,
+  "sample_count": 160000,
+  "fft_size": 262144,
+  "baseline": {
+    "correlation": 0.8784568437628512,
+    "si_sdr_db": 5.289091294224891,
+    "wanted_error_db": 8.857413602698179,
+    "opposite_sideband_suppression_db": 17.556832871045597,
+    "dump_band_energy_percent": 0.3027665090414128,
+    "carrier_relative_db": -59.50488605970854,
+    "phase_step_rms": 0.3874098621806765,
+    "phase_step_p99": 1.2180848353839688,
+    "phase_step_max": 3.1383660350416793
+  },
+  "optimized": {
+    "correlation": 0.9943785087141249,
+    "si_sdr_db": 19.45444331471477,
+    "wanted_error_db": -19.338878170066636,
+    "opposite_sideband_suppression_db": 21.923041818518215,
+    "dump_band_energy_percent": 94.98889632563127,
+    "carrier_relative_db": -67.49020528150604,
+    "phase_step_rms": 2.2736060567120124,
+    "phase_step_p99": 3.120790078322453,
+    "phase_step_max": 3.141585271949581
+  }
+}
