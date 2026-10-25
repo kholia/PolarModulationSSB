@@ -96,6 +96,7 @@ those numbers when qualifying the 2 MHz profile.
 - [Multirate and analytic-envelope DSP](docs/multirate-envelope-dsp.md)
 - [Offline iterative phase-only optimizer](docs/offline-phase-optimizer.md)
 - [Experimental optimized-phase firmware mode](docs/firmware-optimized-phase.md)
+- [Joint envelope/phase optimizer](docs/joint-polar-optimizer.md)
 - [Record macOS system audio](docs/macos-audio-capture.md)
 - [Analyze an Airspy demodulated-audio capture](docs/airspy-audio-analysis.md)
 - [Analyze raw Airspy IQ and the current baseline capture](docs/iq-capture-analysis.md)
