@@ -1,4 +1,4 @@
-// Polar SSB generator for ESP32-S3 using an asynchronously updated Si5351.
+// Polar SSB generator for ESP32-S3 using a low-level FIFO-updated Si5351.
 
 #include <errno.h>
 #include <fcntl.h>
@@ -275,8 +275,8 @@ static void tx_ssb() {
     if (lateness > tx_worst_lateness_us) tx_worst_lateness_us = lateness;
     sample_counter++;
 
-    // This submits the phase update asynchronously. I2C runs in parallel with
-    // the DSP below and must finish before the next sample reuses its buffer.
+    // This starts a low-level FIFO phase update. The wire transfer runs in
+    // parallel with the DSP below and is checked before the next submission.
     uint32_t phase_cycle_start = esp_cpu_get_cycle_count();
     si5351_write_phase_fast(next_b_diff);
     uint32_t phase_cycles = esp_cpu_get_cycle_count() - phase_cycle_start;

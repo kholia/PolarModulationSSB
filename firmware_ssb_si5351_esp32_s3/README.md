@@ -2,15 +2,16 @@
 
 This is the ESP-IDF port of the Pico 2 polar-modulation SSB proof of concept.
 It keeps CAT/USB control on core 0 and pins the timing-critical modulation task
-to core 1. Si5351 phase writes use ESP-IDF's asynchronous I2C master API so the
-wire transfer overlaps the Hilbert transform and speech DSP.
+to core 1. ESP-IDF initializes and probes I2C0; the modulation path then uses a
+small ESP32-S3 FIFO/command-register fast path so the wire transfer overlaps
+the Hilbert transform and speech DSP.
 
 ## Why ESP-IDF
 
 Use ESP-IDF, not the Arduino `Wire` API, for this firmware. The modulation loop
-needs core affinity, maximum task priority, direct control of asynchronous I2C,
-and visibility into missed sample deadlines. Arduino-ESP32 is built on IDF and
-could call the same APIs, but its compatibility layer adds no benefit here.
+needs core affinity, maximum task priority, direct low-level control of I2C0,
+and visibility into missed sample deadlines. Arduino-ESP32 is built on IDF but
+its `Wire` compatibility layer cannot provide this phase-update path.
 
 ## Operating profiles
 
@@ -18,8 +19,8 @@ could call the same APIs, but its compatibility layer adds no benefit here.
 | --- | ---: | ---: | --- |
 | `*i1000*` | 1 MHz | 16 ksample/s | Reduced-speed fallback |
 | `*i2000*` | 2 MHz | 16 ksample/s | Recommended fallback |
-| `*i2032*` | 2 MHz | 32 ksample/s | Current boot default; optimized two-entry phase-write queue |
-| `*i3032*` | 3 MHz | 32 ksample/s | Experimental fallback; 16k analytic core, 32k phase transport |
+| `*i2032*` | 2 MHz | 32 ksample/s | Current default; verified low-level FIFO phase transport |
+| `*i3032*` | 3 MHz | 32 ksample/s | Rejected on tested hardware; retained for experiments only |
 
 Stop TX with `*t*` before changing profile, then use `*t*` again to restart.
 The profile switch changes I2C timing, DSP coefficient banks, WAV decimation,
@@ -30,6 +31,12 @@ dedicated bus, very short traces, low capacitance, and external pull-ups. Start
 around 1.5--2.2 kOhm at 3.3 V and verify SDA/SCL rise time, ACK, and actual SCL
 frequency with a scope or logic analyzer. Do not rely on the ESP32-S3's weak
 internal pull-ups. The 2 MHz profile must be validated on every board revision.
+
+On the tested ESP32-S3/Si5351 board, the FIFO path sustained 32,000 phase
+updates/s with no I2C errors. Average/max phase submission time was 2.5/26.2 us,
+with two deadline misses in 480,007 samples. The generic ESP-IDF transaction
+path reached only about 18,200 updates/s because it repeated substantial
+per-transfer peripheral setup.
 
 With drain modulation disabled, `*v*` toggles a phase-path self-test that
 alternates between 700 Hz and 1900 Hz once per second. Embedded WAV speech is

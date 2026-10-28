@@ -130,7 +130,7 @@ esp_err_t polar_i2c_init(uint8_t address, uint32_t speed_hz) {
   return create_bus(speed_hz);
 }
 
-esp_err_t polar_i2c_enable_async(void) {
+esp_err_t polar_i2c_enable_fast(void) {
   if (fast_ll_enabled) return ESP_OK;
   if (!bus_handle || !device_handle) return ESP_ERR_INVALID_STATE;
   // The IDF driver applies a device's SCL timing lazily at transaction start.
@@ -167,7 +167,7 @@ esp_err_t polar_i2c_set_speed(uint32_t speed_hz) {
   device_handle = nullptr;
   ESP_RETURN_ON_ERROR(add_device(speed_hz), TAG, "failed to select I2C profile");
   if (restore_fast_ll) {
-    ESP_RETURN_ON_ERROR(polar_i2c_enable_async(), TAG,
+    ESP_RETURN_ON_ERROR(polar_i2c_enable_fast(), TAG,
                         "failed to restore low-level I2C");
   }
   ESP_LOGW(TAG, "I2C profile changed to %lu Hz",

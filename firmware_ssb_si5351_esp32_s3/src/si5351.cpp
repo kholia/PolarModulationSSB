@@ -76,9 +76,9 @@ static uint32_t last_phase_p2;
 static uint32_t si5351_ssb_base_p2;
 static volatile struct Si5351PhaseStats phase_stats;
 
-// polar_i2c_submit() copies this calculation buffer into its own queue.
+// polar_i2c_submit() copies this calculation buffer directly into I2C0's FIFO.
 static uint8_t si5351_dma_cmds[7];
-static bool si5351_async_ready;
+static bool si5351_fast_ready;
 
 static void reset_phase_stats(uint32_t initial_p1, uint32_t initial_p2) {
   phase_stats.writes = 0;
@@ -108,8 +108,8 @@ void si5351_get_phase_stats(struct Si5351PhaseStats *stats) {
 }
 
 void si5351_dma_init(void) {
-  si5351_async_ready = polar_i2c_enable_async() == ESP_OK;
-  if (!si5351_async_ready) ESP_LOGE(TAG, "low-level phase writes unavailable");
+  si5351_fast_ready = polar_i2c_enable_fast() == ESP_OK;
+  if (!si5351_fast_ready) ESP_LOGE(TAG, "low-level phase writes unavailable");
 }
 
 void si5351_dma_wait(void) {
@@ -146,8 +146,8 @@ void si5351_write_phase_fast(int32_t b_diff) {
   uint32_t p2 = static_cast<uint32_t>(p2_signed);
 
   // Write the shortest contiguous suffix which changed. polar_i2c_submit()
-  // copies it into a two-entry ring, allowing the next command to be prepared
-  // while the preceding transaction is still leaving the I2C peripheral.
+  // copies it straight into the hardware FIFO and starts START/WRITE/STOP
+  // without reprogramming bus timing or resetting the peripheral.
   size_t len;
   if ((p1 & ~0xFFU) != (last_phase_p1 & ~0xFFU)) {
     // Rare carry into upper P1 bits: update P1[17:0] and P2 atomically.
@@ -185,7 +185,7 @@ void si5351_write_phase_fast(int32_t b_diff) {
   }
   phase_stats.command_bytes = phase_stats.command_bytes + len;
 
-  esp_err_t err = si5351_async_ready
+  esp_err_t err = si5351_fast_ready
                       ? polar_i2c_submit(si5351_dma_cmds, len)
                       : polar_i2c_write(si5351_dma_cmds, len);
   if (err != ESP_OK) {
