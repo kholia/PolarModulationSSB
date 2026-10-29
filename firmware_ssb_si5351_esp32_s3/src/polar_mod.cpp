@@ -15,6 +15,7 @@ static uint32_t polar_analysis_rate_hz = 16000;
 
 // Runtime-tunable parameters (set via CAT commands *eNNN*, *jNNN*)
 float pm_max_phase_step = 0.8f;
+int pm_phase_limiter = 1;
 float pm_soft_knee = 0.0002f;
 float pm_env_threshold = 0.85f;
 float pm_env_ratio = 4.0f;
@@ -284,8 +285,13 @@ void __not_in_flash_func(polar_mod_encode_iq_f)(float x, float y,
   // ── Fix #6: Soft phase limiter (tanh) instead of hard clip ────────────
   // Hard clipping phase creates unfiltered spurs in the demodulated audio.
   // tanh() smoothly saturates — no harmonics generated at the transition.
-  const float max_phase_step = pm_max_phase_step;
-  angle_diff = max_phase_step * fast_tanh_f(angle_diff / max_phase_step);
+  // Only for phase-only transmission: with a real envelope, an angle jump at
+  // an envelope null is harmless and limiting it spreads phase error into the
+  // following non-zero samples.
+  if (pm_phase_limiter) {
+    const float max_phase_step = pm_max_phase_step;
+    angle_diff = max_phase_step * fast_tanh_f(angle_diff / max_phase_step);
+  }
 
   // ── Fix #7: Track ACTUAL transmitted phase, not raw atan2 output ──────
   // The phase limiter may reduce angle_diff below what atan2 requested.

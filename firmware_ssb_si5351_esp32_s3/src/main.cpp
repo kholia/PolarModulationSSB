@@ -11,6 +11,7 @@
 
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "esp_attr.h"
 #include "esp_check.h"
 #include "esp_cpu.h"
 #include "esp_log.h"
@@ -18,10 +19,12 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal/ledc_ll.h"
 #include "sdkconfig.h"
 
 #include "audio_data.h"
 #include "ddx_common.h"
+#include "drain_am.h"
 #include "phase_optimized_data.h"
 #include "polar_mod.h"
 #include "si5351.h"
@@ -37,19 +40,19 @@ static const char *TAG = "polar-ssb";
 struct OperatingProfile {
   uint32_t i2c_hz;
   uint32_t sample_rate_hz;
+  // esp_timer fallback schedule, used only if the LEDC tick fails its check.
   uint8_t period_short_us;
   uint8_t period_long_us;
   uint8_t period_mask;
-  uint8_t interpolation_interval_us;
   uint8_t wav_divisor;
   const char *name;
 };
 
 static constexpr OperatingProfile PROFILES[] = {
-    {1000000, 16000, 62, 63, 1, 5, 2, "1 MHz / 16 ksample/s"},
-    {2000000, 16000, 62, 63, 1, 5, 2, "2 MHz / 16 ksample/s"},
-    {2000000, 32000, 31, 32, 3, 3, 1, "2 MHz / 32 ksample/s (experimental)"},
-    {3000000, 32000, 31, 32, 3, 3, 1, "3 MHz / 32 ksample/s (experimental)"},
+    {1000000, 16000, 62, 63, 1, 2, "1 MHz / 16 ksample/s"},
+    {2000000, 16000, 62, 63, 1, 2, "2 MHz / 16 ksample/s"},
+    {2000000, 32000, 31, 32, 3, 1, "2 MHz / 32 ksample/s (experimental)"},
+    {3000000, 32000, 31, 32, 3, 1, "3 MHz / 32 ksample/s (experimental)"},
 };
 
 #ifdef CONFIG_POLAR_PROFILE_3MHZ_32K
@@ -73,9 +76,18 @@ static volatile bool use_phase_tone_test;
 // dump region. Keep it disabled at boot because measured RF spectrum quality,
 // not reconstructed-audio quality alone, determines whether it is usable.
 static volatile bool use_optimized_phase;
-static volatile int32_t phase_delay_us;
 static volatile bool use_speech_dsp = true;
+#ifdef CONFIG_POLAR_DRAIN_AM
+static volatile bool use_drain_am = true;
+#else
+static volatile bool use_drain_am = false;
+#endif
+// Amplitude delay relative to the phase update in 3.125 us PWM periods.
+// Positive values hold the envelope back. Calibrate per band and sideband.
+static volatile int32_t amp_delay_steps = CONFIG_POLAR_DRAIN_AM_DELAY_STEPS;
 static volatile uint32_t tx_deadline_misses;
+static volatile uint32_t tx_amp_late;
+static volatile bool tx_hw_ticks;
 static volatile int32_t tx_worst_lateness_us;
 static volatile uint64_t tx_phase_cycles_total;
 static volatile uint64_t tx_work_cycles_total;
@@ -84,11 +96,12 @@ static volatile uint32_t tx_phase_cycles_max;
 static volatile uint32_t tx_work_cycles_max;
 
 static volatile float mod_depth = 0.75f;
-static volatile float ampl_smooth = 0.15f;
+// The hardware fade now interpolates the envelope linearly between samples,
+// so the old one-pole smoother is off by default; it only adds envelope delay.
+static volatile float ampl_smooth = 0.0f;
 static volatile float gate_off_thresh = 0.015f;
 static volatile float gate_on_thresh = 0.040f;
 static volatile uint32_t gate_holdoff_ms = 50;
-static constexpr bool ENABLE_AM_MODULATION = false;
 static constexpr bool ENABLE_RF_GATE = false;
 
 uint64_t freq = 14200000ULL;
@@ -97,16 +110,20 @@ static uint16_t offset = 1200;
 static constexpr ledc_mode_t PWM_MODE = LEDC_LOW_SPEED_MODE;
 static constexpr ledc_timer_t PWM_TIMER = LEDC_TIMER_0;
 static constexpr ledc_channel_t PWM_CHANNEL = LEDC_CHANNEL_0;
-static constexpr uint32_t PWM_BITS = 8;
-static constexpr uint32_t PWM_MAX = (1U << PWM_BITS) - 1;
+static constexpr uint32_t PWM_MAX = (1U << DRAIN_PWM_BITS) - 1;
+static constexpr uint32_t PWM_TICK_EVENT =
+    LEDC_LL_EVENT_CHANNEL_OVF_CNT(PWM_MODE, PWM_CHANNEL);
+static ledc_dev_t *const ledc_hw = LEDC_LL_GET_HW(0);
 
 static void init_am_pwm() {
   ledc_timer_config_t timer = {};
   timer.speed_mode = PWM_MODE;
-  timer.duty_resolution = LEDC_TIMER_8_BIT;
+  timer.duty_resolution = LEDC_TIMER_7_BIT;
   timer.timer_num = PWM_TIMER;
-  timer.freq_hz = 312500;  // 80 MHz APB / 256
-  timer.clk_cfg = LEDC_AUTO_CLK;
+  timer.freq_hz = DRAIN_PWM_HZ;
+  // APB is required: 80 MHz / (128 * 500/256) is exact, which locks ten PWM
+  // periods to one 32 ksample/s period.
+  timer.clk_cfg = LEDC_USE_APB_CLK;
   ESP_ERROR_CHECK(ledc_timer_config(&timer));
 
   ledc_channel_config_t channel = {};
@@ -117,14 +134,82 @@ static void init_am_pwm() {
   channel.duty = 0;
   channel.hpoint = 0;
   ESP_ERROR_CHECK(ledc_channel_config(&channel));
+
+  uint32_t divider = 0;
+  ledc_ll_get_clock_divider(ledc_hw, PWM_MODE, PWM_TIMER, &divider);
+  if (divider != 500)
+    ESP_LOGE(TAG, "drain PWM divider is %lu/256, not 500/256; PWM is not "
+                  "locked to the sample rate",
+             static_cast<unsigned long>(divider));
 }
 
-static inline void write_am_pwm(uint16_t value) {
+// Load a start duty and a linear fade; both latch on the next PWM boundary.
+// Only the TX task touches this channel and the fade service is not
+// installed, so the registers are written directly to keep this short.
+static inline void IRAM_ATTR program_am_pwm(int32_t start_q4,
+                                            const DrainRamp &ramp) {
+  ledc_hw->channel_group[PWM_MODE].channel[PWM_CHANNEL].duty.duty =
+      static_cast<uint32_t>(start_q4);
+  ledc_ll_set_fade_param(ledc_hw, PWM_MODE, PWM_CHANNEL, ramp.increase, 1,
+                         ramp.scale, ramp.steps);
+  ledc_ll_set_sig_out_en(ledc_hw, PWM_MODE, PWM_CHANNEL, true);
+  ledc_ll_set_duty_start(ledc_hw, PWM_MODE, PWM_CHANNEL);
+  ledc_ll_ls_channel_update(ledc_hw, PWM_MODE, PWM_CHANNEL);
+}
+
+static inline void write_am_pwm(uint32_t value) {
   if (value > PWM_MAX) value = PWM_MAX;
-  // Only the TX task touches this channel, so the non-thread-safe direct API
-  // is sufficient and does not require ESP-IDF's LEDC fade service.
-  (void)ledc_set_duty(PWM_MODE, PWM_CHANNEL, value);
-  (void)ledc_update_duty(PWM_MODE, PWM_CHANNEL);
+  program_am_pwm(static_cast<int32_t>(value << DRAIN_DUTY_FRAC_BITS),
+                 {1, 0, 1});
+}
+
+// The PWM channel's overflow counter raises a raw event every
+// `steps_per_sample` PWM periods. Polling that bit gives sample ticks that
+// sit exactly on PWM boundaries, which is what makes the amplitude delay
+// resolvable to one 3.125 us PWM period.
+static void start_pwm_ticks(uint32_t steps_per_sample) {
+  ledc_ll_channel_enable_timer_ovt_cnt(ledc_hw, PWM_MODE, PWM_CHANNEL, false);
+  ledc_ll_channel_set_maximum_timer_ovf_cnt(ledc_hw, PWM_MODE, PWM_CHANNEL,
+                                            steps_per_sample);
+  ledc_ll_channel_reset_timer_ovf_cnt(ledc_hw, PWM_MODE, PWM_CHANNEL);
+  ledc_ll_channel_enable_timer_ovt_cnt(ledc_hw, PWM_MODE, PWM_CHANNEL, true);
+  ledc_ll_ls_channel_update(ledc_hw, PWM_MODE, PWM_CHANNEL);
+  ledc_ll_clear_intr_status(ledc_hw, PWM_TICK_EVENT);
+}
+
+static void stop_pwm_ticks() {
+  ledc_ll_channel_enable_timer_ovt_cnt(ledc_hw, PWM_MODE, PWM_CHANNEL, false);
+  ledc_ll_ls_channel_update(ledc_hw, PWM_MODE, PWM_CHANNEL);
+  ledc_ll_clear_intr_status(ledc_hw, PWM_TICK_EVENT);
+}
+
+static inline bool IRAM_ATTR pwm_tick_pending() {
+  return (ledc_hw->int_raw.val & PWM_TICK_EVENT) != 0;
+}
+
+// The overflow-counter event is not used by ESP-IDF itself, so check it
+// before trusting it: three consecutive events must be one sample apart.
+static bool verify_pwm_ticks(uint32_t sample_rate_hz) {
+  const uint32_t cycles_per_us = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+  const uint32_t expected =
+      cycles_per_us * 1000000U / sample_rate_hz;  // 7500 or 15000 cycles
+  uint32_t stamps[3];
+  ledc_ll_clear_intr_status(ledc_hw, PWM_TICK_EVENT);
+  for (uint32_t &stamp : stamps) {
+    uint32_t start = esp_cpu_get_cycle_count();
+    while (!pwm_tick_pending()) {
+      if (esp_cpu_get_cycle_count() - start > 1000U * cycles_per_us)
+        return false;
+    }
+    stamp = esp_cpu_get_cycle_count();
+    ledc_ll_clear_intr_status(ledc_hw, PWM_TICK_EVENT);
+  }
+  for (int i = 1; i < 3; ++i) {
+    uint32_t interval = stamps[i] - stamps[i - 1];
+    uint32_t error = interval > expected ? interval - expected : expected - interval;
+    if (error > 2U * cycles_per_us) return false;
+  }
+  return true;
 }
 
 static inline void set_fixed_tx_amplitude() {
@@ -156,7 +241,11 @@ static bool select_profile(uint32_t index) {
 
 static int16_t get_two_tone_sample(uint32_t sample_index,
                                    uint32_t sample_rate_hz) {
-  float t = static_cast<float>(sample_index) / sample_rate_hz;
+  // 700 and 1900 Hz share a 100 Hz period. Wrapping the index keeps the float
+  // time base exact; an unwrapped float t degrades the tones to about -42 dBc
+  // after 10 s and -27 dBc after 60 s of transmission.
+  float t = static_cast<float>(sample_index % (sample_rate_hz / 100)) /
+            sample_rate_hz;
   float sample = 0.5f * sinf(2.0f * M_PI * 700.0f * t) +
                  0.5f * sinf(2.0f * M_PI * 1900.0f * t);
   return static_cast<int16_t>(sample * 16384.0f);
@@ -188,17 +277,37 @@ static void tx_ssb() {
   const bool optimized_phase_active =
       use_optimized_phase &&
       profile.sample_rate_hz == optimized_phase_sample_rate_hz;
+  const bool drain_am = use_drain_am;
+  const uint32_t steps_per_sample = DRAIN_PWM_HZ / profile.sample_rate_hz;
+  const int32_t delay_steps = amp_delay_steps;
+  const DrainAlignment alignment =
+      drain_split_delay(delay_steps, steps_per_sample);
+  const uint32_t cycles_per_us = CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ;
+  const uint32_t step_cycles = cycles_per_us * 1000000U / DRAIN_PWM_HZ;
+  const uint32_t sample_cycles = steps_per_sample * step_cycles;
+  // The fade must be written after PWM boundary (boundary - 1) and before
+  // `boundary`, where it latches. Aim a quarter period into that window.
+  const uint32_t amp_window_cycles =
+      alignment.boundary == 1 ? 0
+                              : (alignment.boundary - 1) * step_cycles +
+                                    step_cycles / 4;
+  const uint32_t amp_deadline_cycles =
+      alignment.boundary * step_cycles - step_cycles / 8;
+  // Run the DSP in the larger gap: after the amplitude write when it comes
+  // early in the period, before it when it comes late.
+  const bool dsp_before_amp = 2 * alignment.boundary > steps_per_sample;
+
+  // Whole-sample alignment: both paths read their value from these rings,
+  // indexed by DSP output count, so either path can be held back.
+  int32_t phase_history[DRAIN_HISTORY] = {};
+  int32_t amp_history[DRAIN_HISTORY] = {};
+  uint32_t history_count = 0;
+  int32_t am_duty_q4 = 0;
+
   int64_t last_sample_time;
   uint32_t test_sample_index = 0;
-  int32_t next_b_diff = 0;
-  int next_amplitude = 16384;
-  int previous_amplitude = 16384;
-  int interpolation_base = 16384;
-  int interpolation_slope = 0;
-  uint32_t interpolation_step = 12;
   uint32_t sample_counter = 0;
-  float smooth_amplitude = 16384.0f;
-  float sigma_delta_error = 0.0f;
+  float smooth_amplitude = 0.0f;
   double b_accumulator = 0.0;
 
   bool gate_enabled = true;
@@ -209,11 +318,27 @@ static void tx_ssb() {
   uint32_t holdoff_counter = 0;
 
   tx_dsp_reset();
+  pm_phase_limiter = drain_am ? 0 : 1;
   gpio_set_level(static_cast<gpio_num_t>(PTT), 1);
-  if (!ENABLE_AM_MODULATION) set_fixed_tx_amplitude();
+  if (drain_am)
+    write_am_pwm(0);
+  else
+    set_fixed_tx_amplitude();
   ESP_LOGI(TAG, "configuring CLK0 for %llu Hz SSB", freq);
   si5351_setup_ssb(freq, profile.sample_rate_hz);
   printf("[TX-SSB] Start %llu Hz (%s)\n", freq, profile.name);
+  if (drain_am)
+    printf("[DRAIN-AM] amplitude delay %ld steps (%.2f us): amplitude +%lu, "
+           "phase +%lu samples, fade latches on PWM boundary %lu/%lu; "
+           "phase limiter off\n",
+           static_cast<long>(delay_steps),
+           delay_steps * 1000000.0 / DRAIN_PWM_HZ,
+           static_cast<unsigned long>(alignment.amplitude_samples),
+           static_cast<unsigned long>(alignment.phase_samples),
+           static_cast<unsigned long>(alignment.boundary),
+           static_cast<unsigned long>(steps_per_sample));
+  else
+    printf("[DRAIN-AM] off: fixed drain, phase-only (enable with *a1*)\n");
   if (use_phase_tone_test)
     printf("[PHASE-TEST] Alternating 700/1900 Hz every second; use *v* to disable\n");
   else if (optimized_phase_active)
@@ -222,10 +347,20 @@ static void tx_ssb() {
   else if (use_optimized_phase)
     printf("[PHASE-OPT] Requires the 16 ksample/s profile; using live DSP path\n");
 
+  start_pwm_ticks(steps_per_sample);
+  const bool hw_ticks = verify_pwm_ticks(profile.sample_rate_hz);
+  tx_hw_ticks = hw_ticks;
+  if (!hw_ticks) {
+    stop_pwm_ticks();
+    ESP_LOGE(TAG, "LEDC sample tick failed its self-check; falling back to "
+                  "the esp_timer schedule (amplitude alignment is coarse)");
+  }
+
   // Start the sample clock only after the blocking PLL configuration and UART
   // messages. Starting it at function entry made every TX begin about 2 ms
   // behind and created an unnecessary burst of catch-up phase writes.
   tx_deadline_misses = 0;
+  tx_amp_late = 0;
   tx_worst_lateness_us = 0;
   tx_phase_cycles_total = 0;
   tx_work_cycles_total = 0;
@@ -233,66 +368,91 @@ static void tx_ssb() {
   tx_phase_cycles_max = 0;
   tx_work_cycles_max = 0;
   last_sample_time = esp_timer_get_time();
+  uint32_t previous_tick_cycles = esp_cpu_get_cycle_count();
+  if (hw_ticks) ledc_ll_clear_intr_status(ledc_hw, PWM_TICK_EVENT);
 
   while (start_tx) {
-    int64_t now = esp_timer_get_time();
-
-    if (ENABLE_AM_MODULATION && interpolation_step < 12 &&
-        now >= last_sample_time +
-                   static_cast<int64_t>(interpolation_step + 1) *
-                       profile.interpolation_interval_us) {
-      int amplitude = interpolation_base +
-                      interpolation_slope * static_cast<int>(interpolation_step + 1) /
-                          12;
-      if (amplitude < 0) amplitude = 0;
-      if (amplitude > 65535) amplitude = 65535;
-      float shaped = static_cast<float>(amplitude) / 256.0f + sigma_delta_error;
-      int pwm = static_cast<int>(shaped + 0.5f);
-      if (pwm < 0) pwm = 0;
-      if (pwm > static_cast<int>(PWM_MAX)) pwm = PWM_MAX;
-      sigma_delta_error = shaped - static_cast<float>(pwm);
-      write_am_pwm(static_cast<uint16_t>(pwm));
-      interpolation_step++;
-    }
-
-    int64_t target_time =
-        last_sample_time +
-        ((sample_counter & profile.period_mask) == profile.period_mask
-             ? profile.period_long_us
-             : profile.period_short_us);
-    if (now < target_time) continue;
-
-    int32_t lateness = static_cast<int32_t>(now - target_time);
-    if (lateness >= profile.period_short_us) {
-      tx_deadline_misses = tx_deadline_misses + 1;
-      // A late sample cannot be recovered in the past. Rebase instead of
-      // issuing several phase updates back-to-back, which turns scheduler
-      // jitter into a concentrated RF/audio phase burst.
-      last_sample_time = now;
+    uint32_t tick_cycles;
+    if (hw_ticks) {
+      if (pwm_tick_pending()) {
+        // The previous sample overran: this boundary has already passed.
+        tx_deadline_misses = tx_deadline_misses + 1;
+      } else {
+        while (!pwm_tick_pending()) {
+          if (!start_tx) break;
+        }
+        if (!start_tx) break;
+      }
+      ledc_ll_clear_intr_status(ledc_hw, PWM_TICK_EVENT);
+      tick_cycles = esp_cpu_get_cycle_count();
+      int32_t lateness = static_cast<int32_t>(tick_cycles - previous_tick_cycles -
+                                              sample_cycles) /
+                         static_cast<int32_t>(cycles_per_us);
+      if (sample_counter > 0 && lateness > tx_worst_lateness_us)
+        tx_worst_lateness_us = lateness;
+      previous_tick_cycles = tick_cycles;
     } else {
-      last_sample_time = target_time;
+      int64_t now = esp_timer_get_time();
+      int64_t target_time =
+          last_sample_time +
+          ((sample_counter & profile.period_mask) == profile.period_mask
+               ? profile.period_long_us
+               : profile.period_short_us);
+      if (now < target_time) continue;
+
+      int32_t lateness = static_cast<int32_t>(now - target_time);
+      if (lateness >= profile.period_short_us) {
+        tx_deadline_misses = tx_deadline_misses + 1;
+        // A late sample cannot be recovered in the past. Rebase instead of
+        // issuing several phase updates back-to-back, which turns scheduler
+        // jitter into a concentrated RF/audio phase burst.
+        last_sample_time = now;
+      } else {
+        last_sample_time = target_time;
+      }
+      if (lateness > tx_worst_lateness_us) tx_worst_lateness_us = lateness;
+      tick_cycles = esp_cpu_get_cycle_count();
     }
-    if (lateness > tx_worst_lateness_us) tx_worst_lateness_us = lateness;
     sample_counter++;
+
+    auto history_at = [&](const int32_t *ring, uint32_t delay) -> int32_t {
+      if (history_count <= delay) return 0;
+      return ring[(history_count - 1 - delay) % DRAIN_HISTORY];
+    };
+    // Snapshot both values at the tick: the DSP below appends to the history,
+    // and a fade written after it must still use this tick's sample.
+    const int32_t amp_target = history_at(amp_history, alignment.amplitude_samples);
+    const int32_t phase_value = history_at(phase_history, alignment.phase_samples);
+    bool amp_pending = drain_am;
+    auto update_amplitude = [&]() {
+      uint32_t elapsed = esp_cpu_get_cycle_count() - tick_cycles;
+      if (elapsed > amp_deadline_cycles) {
+        // Too late for the intended boundary; the fade latches one or more
+        // PWM periods later for this sample only.
+        tx_amp_late = tx_amp_late + 1;
+      } else {
+        while (esp_cpu_get_cycle_count() - tick_cycles < amp_window_cycles) {
+        }
+      }
+      int32_t start_q4 = am_duty_q4;
+      DrainRamp ramp = drain_plan_ramp(&am_duty_q4, amp_target, steps_per_sample);
+      program_am_pwm(start_q4, ramp);
+      amp_pending = false;
+    };
+
+    // The first boundary's window opens at the tick itself, so the fade goes
+    // out before the comparatively slow FIFO refill.
+    if (amp_pending && alignment.boundary == 1) update_amplitude();
 
     // This starts a low-level FIFO phase update. The wire transfer runs in
     // parallel with the DSP below and is checked before the next submission.
     uint32_t phase_cycle_start = esp_cpu_get_cycle_count();
-    si5351_write_phase_fast(next_b_diff);
+    si5351_write_phase_fast(phase_value);
     uint32_t phase_cycles = esp_cpu_get_cycle_count() - phase_cycle_start;
     tx_phase_cycles_total += phase_cycles;
     if (phase_cycles > tx_phase_cycles_max) tx_phase_cycles_max = phase_cycles;
 
-    if (phase_delay_us > 0) esp_rom_delay_us(phase_delay_us);
-    if (ENABLE_AM_MODULATION) {
-      float shaped =
-          static_cast<float>(next_amplitude) / 256.0f + sigma_delta_error;
-      int pwm = static_cast<int>(shaped + 0.5f);
-      if (pwm < 0) pwm = 0;
-      if (pwm > static_cast<int>(PWM_MAX)) pwm = PWM_MAX;
-      sigma_delta_error = shaped - static_cast<float>(pwm);
-      write_am_pwm(static_cast<uint16_t>(pwm));
-    }
+    if (amp_pending && !dsp_before_amp) update_amplitude();
 
     uint32_t work_cycle_start = esp_cpu_get_cycle_count();
     float amplitude;
@@ -337,28 +497,27 @@ static void tx_ssb() {
       float input = static_cast<float>(sample) / 32768.0f;
       tx_dsp_process(input, use_speech_dsp, &amplitude, &phase_difference);
     }
+
+    b_accumulator += static_cast<double>(phase_difference * ssb_phase_to_b_factor);
+    int32_t b_diff = static_cast<int32_t>(b_accumulator);
+    b_accumulator -= b_diff;
+
+    float target_amplitude = amplitude * mod_depth;
+    if (target_amplitude > 1.0f) target_amplitude = 1.0f;
+    if (target_amplitude < 0.0f) target_amplitude = 0.0f;
+    smooth_amplitude = smooth_amplitude * ampl_smooth +
+                       target_amplitude * (1.0f - ampl_smooth);
+
+    phase_history[history_count % DRAIN_HISTORY] = b_diff;
+    amp_history[history_count % DRAIN_HISTORY] =
+        static_cast<int32_t>(smooth_amplitude * DRAIN_DUTY_MAX_Q4 + 0.5f);
+    history_count++;
     uint32_t work_cycles = esp_cpu_get_cycle_count() - work_cycle_start;
     tx_work_cycles_total += work_cycles;
     if (work_cycles > tx_work_cycles_max) tx_work_cycles_max = work_cycles;
     tx_profiled_samples = tx_profiled_samples + 1;
 
-    b_accumulator += static_cast<double>(phase_difference * ssb_phase_to_b_factor);
-    next_b_diff = static_cast<int32_t>(b_accumulator);
-    b_accumulator -= next_b_diff;
-    if (b_accumulator > 1.0) b_accumulator -= 1.0;
-    if (b_accumulator < -1.0) b_accumulator += 1.0;
-
-    float target_amplitude = amplitude * 65535.0f * mod_depth;
-    if (target_amplitude > 65535.0f) target_amplitude = 65535.0f;
-    if (target_amplitude < 0.0f) target_amplitude = 0.0f;
-    smooth_amplitude = smooth_amplitude * ampl_smooth +
-                       target_amplitude * (1.0f - ampl_smooth);
-    next_amplitude = static_cast<int>(smooth_amplitude);
-
-    interpolation_base = previous_amplitude;
-    interpolation_slope = next_amplitude - previous_amplitude;
-    previous_amplitude = next_amplitude;
-    interpolation_step = 0;
+    if (amp_pending) update_amplitude();
 
     if (ENABLE_RF_GATE) {
       if (gate_enabled) {
@@ -389,13 +548,17 @@ static void tx_ssb() {
     }
   }
 
+  if (hw_ticks) stop_pwm_ticks();
   si5351_dma_wait();
   si5351_output_enable(SI5351_CLK0, 0);
   write_am_pwm(0);
   gpio_set_level(static_cast<gpio_num_t>(PTT), 0);
-  printf("[TX-SSB] End; deadline misses=%lu, worst lateness=%ld us\n",
+  printf("[TX-SSB] End; deadline misses=%lu, worst lateness=%ld us, "
+         "late amplitude updates=%lu, %s ticks\n",
          static_cast<unsigned long>(tx_deadline_misses),
-         static_cast<long>(tx_worst_lateness_us));
+         static_cast<long>(tx_worst_lateness_us),
+         static_cast<unsigned long>(tx_amp_late),
+         hw_ticks ? "LEDC" : "esp_timer");
 }
 
 static void tx_ft8() {
@@ -481,10 +644,30 @@ static void process_cat_command(char *command) {
       freq = strtoull(command + 2, nullptr, 10);
       printf("Freq: %llu\n", freq);
       break;
-    case 'd':
-      phase_delay_us = atoi(command + 2);
-      printf("Delay: %ld us\n", static_cast<long>(phase_delay_us));
+    case 'a':
+      if (command[2] == '1')
+        use_drain_am = true;
+      else if (command[2] == '0')
+        use_drain_am = false;
+      else
+        use_drain_am = !use_drain_am;
+      printf("Drain AM: %s (takes effect on next TX)\n",
+             use_drain_am ? "ON" : "OFF");
       break;
+    case 'd': {
+      // Amplitude delay relative to phase, in 3.125 us PWM periods.
+      long value = strtol(command + 2, nullptr, 10);
+      if (command[2] != '*' && value >= DRAIN_DELAY_MIN_STEPS &&
+          value <= DRAIN_DELAY_MAX_STEPS)
+        amp_delay_steps = static_cast<int32_t>(value);
+      printf("Amplitude delay: %ld steps (%.2f us; range %ld..%ld; takes "
+             "effect on next TX)\n",
+             static_cast<long>(amp_delay_steps),
+             amp_delay_steps * 1000000.0 / DRAIN_PWM_HZ,
+             static_cast<long>(DRAIN_DELAY_MIN_STEPS),
+             static_cast<long>(DRAIN_DELAY_MAX_STEPS));
+      break;
+    }
     case 'i': {
       uint32_t speed_khz = strtoul(command + 2, nullptr, 10);
       if (speed_khz == 1000)
@@ -645,7 +828,7 @@ static void console_task(void *) {
       ESP_LOGI(TAG,
                "[%s] phase writes=%lu (%.0f/s), b_diff=[%ld,%ld] last=%ld, P1=%lu P2=%lu, "
                "i2c=%.2f B/write, submit_err=%lu wait_err=%lu upper_carry=%lu, "
-               "deadline_miss=%lu worst_late=%ld us, "
+               "deadline_miss=%lu worst_late=%ld us amp_late=%lu %s, "
                "phase=%.1f/%0.1f us work=%.1f/%0.1f us avg/max",
                tx_mode,
                static_cast<unsigned long>(stats.writes),
@@ -663,6 +846,8 @@ static void console_task(void *) {
                static_cast<unsigned long>(stats.p1_upper_changes),
                static_cast<unsigned long>(tx_deadline_misses),
                static_cast<long>(tx_worst_lateness_us),
+               static_cast<unsigned long>(tx_amp_late),
+               tx_hw_ticks ? "LEDC" : "esp_timer",
                tx_profiled_samples == 0
                    ? 0.0
                    : static_cast<double>(tx_phase_cycles_total) /

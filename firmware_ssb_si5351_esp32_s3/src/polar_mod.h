@@ -21,6 +21,10 @@ extern "C" {
 
   // Runtime-tunable polar modulation parameters.
   extern float pm_max_phase_step;  // Max step (default 0.4 @32k, 0.8 @16k)
+  // Soft phase-step limiter. Useful for phase-only transmission; with drain
+  // modulation it distorts the envelope/phase pairing (about 18 dB worse
+  // two-tone IMD3 in simulation), so the TX loop clears it in that mode.
+  extern int pm_phase_limiter;
   extern float pm_soft_knee;       // Soft knee threshold (default 0.0002)
   extern float pm_env_threshold;   // Analytic-envelope compressor threshold
   extern float pm_env_ratio;       // Compressor ratio; 1.0 disables compression

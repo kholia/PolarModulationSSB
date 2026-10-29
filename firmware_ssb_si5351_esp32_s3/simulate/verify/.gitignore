@@ -1,0 +1,5 @@
+out/
+__pycache__/
+c5_softfloat_bench/build/
+c5_softfloat_bench/sdkconfig
+c5_softfloat_bench/sdkconfig.old

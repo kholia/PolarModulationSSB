@@ -58,9 +58,13 @@ The 25 MHz TCXO drives XA directly, so firmware configures the Si5351's
 internal crystal load capacitance to 0 pF. Change pins, the TCXO value, or the boot profile with
 `idf.py menuconfig` under **Polar SSB configuration**.
 
-The amplitude output is 8-bit, first-order noise-shaped PWM at 312.5 kHz. It
-requires the same external reconstruction/filter and drain modulator expected
-by the Pico firmware.
+The amplitude output is a 320 kHz, 7-bit LEDC PWM that also clocks the
+sample ticks (ten PWM periods per 32 ksample/s period). Each sample programs a
+hardware linear fade, and `*dN*` aligns the envelope to the phase in 3.125 us
+steps. Drain modulation is off at boot unless `POLAR_DRAIN_AM` is set; enable
+it with `*a1*`. It requires the same external reconstruction/filter and drain
+modulator expected by the Pico firmware. See
+[QMX lessons and drain-AM timing](docs/qmx-lessons-and-drain-am.md).
 
 The 32 ksample/s profile uses matched 31-tap halfband filters: input audio is
 decimated to a 16 ksample/s speech/Hilbert core, and the resulting complex I/Q
@@ -90,7 +94,16 @@ It mounts the source tree at `/project`, so the host-side `build/` directory is
 reused for fast incremental builds. It uses `espressif/idf:latest` by default.
 Pin another image when needed with, for example,
 `IDF_IMAGE=espressif/idf:v5.4.2 make`. Use `make local-build` when ESP-IDF is
-installed locally.
+installed locally. If `build/` was configured by a different IDF image or
+Python environment, the build runs `idf.py fullclean` once and retries.
+
+Flash the binaries in `build-output/` with the host `esptool`:
+
+```sh
+make flash                    # first /dev/cu.usbmodem* port, 460800 baud
+make flash PORT=/dev/ttyACM0  # explicit port (BAUD=... also accepted)
+make build-flash              # build, then flash
+```
 
 The USB Serial/JTAG console is enabled by default. When TX stops it prints the
 number of full-period deadline misses and the worst observed lateness; use
@@ -104,6 +117,8 @@ those numbers when qualifying the 2 MHz profile.
 - [Offline iterative phase-only optimizer](docs/offline-phase-optimizer.md)
 - [Experimental optimized-phase firmware mode](docs/firmware-optimized-phase.md)
 - [Joint envelope/phase optimizer](docs/joint-polar-optimizer.md)
+- [QMX lessons and drain-AM timing](docs/qmx-lessons-and-drain-am.md)
+- [Verification suite](simulate/verify/README.md)
 - [Record macOS system audio](docs/macos-audio-capture.md)
 - [Analyze an Airspy demodulated-audio capture](docs/airspy-audio-analysis.md)
 - [Analyze raw Airspy IQ and the current baseline capture](docs/iq-capture-analysis.md)

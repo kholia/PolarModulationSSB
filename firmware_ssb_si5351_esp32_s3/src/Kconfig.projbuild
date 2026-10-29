@@ -42,4 +42,23 @@ menu "Polar SSB configuration"
         range 10000000 40000000
         default 25000000
 
+    config POLAR_DRAIN_AM
+        bool "Drain (envelope) modulation enabled at boot"
+        default n
+        help
+            Drive the drain modulator from the analytic envelope with a 320 kHz,
+            7-bit LEDC PWM and hardware linear fades. Requires the external
+            reconstruction filter and modulator. Toggle at run time with *a*.
+            The phase-step limiter is bypassed while this is on.
+
+    config POLAR_DRAIN_AM_DELAY_STEPS
+        int "Amplitude delay relative to phase (3.125 us PWM periods)"
+        range -60 80
+        default 6
+        help
+            Positive values hold the envelope back. The default covers the
+            average 2 MHz Si5351 transfer only; the drain filter's group delay
+            moves the optimum lower. Calibrate on air per band and sideband
+            with *dN*.
+
 endmenu
